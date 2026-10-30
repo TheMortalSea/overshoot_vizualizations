@@ -1,0 +1,12 @@
+# Settings for the overshoot permafrost pipeline.
+# On first run the notebook copies this file to config/run_config.yaml.
+# Edit run_config.yaml (not this example file); it is not tracked by git.
+
+# Which run to process
+model: CLM          # registered model name, e.g. CLM, CLASSIC
+forcing: gfdl       # PRIME GCM pattern: ukesm, ipsl or gfdl
+simulation: ml      # overshoot simulation: l, m, ml, hl, hl_cf, hist, ctrl, ...
+
+# Options
+recompute: true         # true on a fresh run or after changing inputs
+run_depth_bands: false  # slow (~10-15 min): scans 3D soil temperature
