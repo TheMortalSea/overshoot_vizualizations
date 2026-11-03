@@ -497,7 +497,7 @@ def discover_models(wr) -> list[str]:
     return []
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--io-module", default=DEFAULT_IO_MODULE)
     ap.add_argument("--models", nargs="+")
@@ -510,10 +510,11 @@ def main():
     ap.add_argument("--magnitude-ratio", type=float, default=20.0)
     ap.add_argument("--out-dir", type=Path)
     ap.add_argument("--reuse", type=Path, help="existing records.csv: skip probing, just re-analyse")
-    args = ap.parse_args()
+    ap.add_argument("--quiet", action="store_true", help="do not print the full report")
+    args = ap.parse_args(argv)
 
-    here = Path(__file__).resolve().parent
-    for p in (here, here.parent, here.parent / "src"):
+    here = Path(globals().get("__file__", Path.cwd())).resolve().parent
+    for p in (here, here.parent, here.parent / "src", Path.cwd()):
         sys.path.insert(0, str(p))
     io = importlib.import_module(args.io_module)
 
@@ -556,8 +557,11 @@ def main():
                 variables=sorted(df["variable"].unique()))
     report = build_report(df, cov, flags, reps, groups, overlaps, meta)
     (out_dir / "report.md").write_text(report)
-    print("\n" + report)
+    if not args.quiet:
+        print("\n" + report)
     print(f"\nWrote outputs to {out_dir}")
+    return dict(df=df, coverage=cov, flags=flags, reps=reps, groups=groups,
+                overlaps=overlaps, report=report, out_dir=out_dir)
 
 
 if __name__ == "__main__":
