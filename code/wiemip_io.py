@@ -177,13 +177,13 @@ def load(
 ) -> xr.DataArray:
     """Read a variable (native units) from the registry with standardised coords."""
     file = retrieve(variable, model, forcing, simulation, factorial)
-    da = standardise(file.read())
+    da = _clean_attrs(standardise(file.read()))
     da.attrs.update(
         {
-            "wiemip_model": model,
-            "wiemip_forcing": forcing,
-            "wiemip_simulation": simulation,
-            "wiemip_variable": variable,
+            "wiemip_model": str(model),
+            "wiemip_forcing": str(forcing),
+            "wiemip_simulation": str(simulation),
+            "wiemip_variable": str(variable),
             "wiemip_path": str(file.path),
         }
     )
@@ -366,9 +366,18 @@ def load_series(
     silent gap or overlap would corrupt any downstream trend.
     """
     da = load(variable, model, forcing, simulation, factorial)
+    # Sanitise metadata before any subsequent xarray operations.
+    da = _clean_attrs(da)
+    
     if reducer is not None:
-        da = reducer(da)
-    series = to_annual(da).sortby("time")
+        da = _clean_attrs(reducer(da))
+    
+    annual = to_annual(da)
+    annual = _clean_attrs(annual)
+    
+    # Sort only after cleaning metadata.
+    series = annual.sortby("time")
+    series = _clean_attrs(series)
     if hasattr(series.data, "compute"):
         series = series.compute()
 
@@ -392,4 +401,34 @@ def land_fraction(obj, *args, **kwargs):
     """Alias for get_landfrac."""
     return get_landfrac(obj)
 
+def _plain(v):
+    """Convert metadata into safely copyable Python values."""
 
+    if v is None or isinstance(v, (str, int, float, bool)):
+        return v
+
+    if isinstance(v, np.generic):
+        return v.item()
+
+    if isinstance(v, np.ndarray):
+        if v.dtype == object:
+            return [_plain(x) for x in v.tolist()]
+        return v.copy()
+
+    if isinstance(v, dict):
+        return {str(k): _plain(val) for k, val in v.items()}
+
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+
+    return str(v)
+
+
+def _clean_attrs(obj):
+    """Make every attribute on a DataArray and its coordinates deep-copyable."""
+    obj = obj.copy(deep=False)
+    obj.attrs = {k: _plain(v) for k, v in obj.attrs.items()}
+    for name in list(obj.coords):
+        var = obj.coords[name].variable
+        var.attrs = {k: _plain(v) for k, v in var.attrs.items()}
+    return obj
