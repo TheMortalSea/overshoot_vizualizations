@@ -33,6 +33,17 @@ History (--history)
 Also computes the historical run (--hist-sim, default "hist") for every model/part that has it
 and draws it in the registry's "hist" colour ahead of the scenarios. Do not put "hist" in
 --scenarios.
+--hist-start (default HIST_START = 1950) drops historical years before that year; 0 keeps the
+whole record. It is applied when plotting, so cached series are unaffected.
+
+Anomalies (--anomaly)
+---------------------
+Plots the change since a base year (--base-year, default 2024) instead of the raw values:
+each scenario has its own base-year value subtracted, so every scenario line starts at zero.
+The historical run has the mean of the scenarios' base-year values (for that model and part)
+subtracted, so it joins the scenarios at zero. If a series has no value in the base year,
+the nearest year is used and a note is printed. Cached series stay raw, so switching this on
+or off never recomputes anything. Chart files get an "_anom<year>" suffix.
 
 A consistency check is printed for each model: above + below should equal the total
 (cSoil). A ratio far from 1 means one of the variables is not what its name says.
@@ -43,6 +54,8 @@ Notebook use:
               "--history", "--check-only"])
     wsc.main(["--io-module", "wiemip_io", "--forcing", "gfdl", "--scenarios", "all",
               "--history", "--mask-regions", "101", "103", "106", "108", "--share-y"])
+    wsc.main(["--io-module", "wiemip_io", "--forcing", "gfdl", "--scenarios", "all",
+              "--history", "--anomaly"])                       # change since 2024
 """
 
 from __future__ import annotations
@@ -81,6 +94,7 @@ def scen_colour(s: str) -> str:
     return SCENARIO_COLORS.get(base, "#555555")
 
 
+HIST_START = 1950                           # first historical year shown (0 = show everything)
 CUT = 1.0                                   # depth (m) separating "above" from "below"
 NOLEAP = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], dtype="f8")
 SPATIAL = {"time", "lat", "lon", "latitude", "longitude"}
@@ -338,6 +352,41 @@ def describe_plan(model, p, hist_sim=None):
 
 
 # ---------------------------------------------------------------------------
+# Anomalies
+# ---------------------------------------------------------------------------
+
+def to_anomaly(data, hist_data, base_year):
+    """Change since `base_year`, computed at plot time (cached series stay raw).
+
+    Each scenario has its own base-year value subtracted. The historical run has the mean of the
+    scenarios' base-year values (same model and part) subtracted, so it joins the scenarios at
+    zero. A series without a base-year value uses its nearest year instead (reported in `notes`).
+    Returns (data, hist_data, notes) in the same structure as the inputs.
+    """
+    notes = []
+
+    def reference(ser, label):
+        if base_year in ser.index:
+            return float(ser.loc[base_year])
+        yr = int(ser.index[int(np.argmin(np.abs(np.asarray(ser.index, dtype="f8") - base_year)))])
+        notes.append(f"{label}: no {base_year} value, used {yr}")
+        return float(ser.loc[yr])
+
+    new_data, new_hist = {}, {}
+    for key, scen in data.items():
+        refs, new_data[key] = [], {}
+        for s, ser in scen.items():
+            r = reference(ser, f"{key[0]}/{s}/{key[1]}")
+            refs.append(r)
+            new_data[key][s] = ser - r
+        if key in hist_data:
+            h = hist_data[key]
+            base = float(np.mean(refs)) if refs else reference(h, f"{key[0]}/hist/{key[1]}")
+            new_hist[key] = h - base
+    return new_data, new_hist, notes
+
+
+# ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
 
@@ -348,7 +397,7 @@ def scenario_styles(scenarios) -> dict:
             for s in scenarios}
 
 
-def plot_model(io, cfg, model, part, series, hist, styles, ylim):
+def plot_model(io, cfg, model, part, series, hist, styles, ylim, anomaly=False, base_year=2024):
     title = PARTS[part]["title"]
     fig, ax = plt.subplots(figsize=(7.5, 4.6))
     order = {s: i for i, s in enumerate(SCENARIO_COLORS)}
@@ -361,12 +410,16 @@ def plot_model(io, cfg, model, part, series, hist, styles, ylim):
     if hist is not None and series:
         start = min(int(s.index.min()) for s in series.values())
         ax.axvline(start, color="0.6", ls=":", lw=1)
+    if anomaly:
+        ax.axhline(0, color="0.4", lw=0.8)
     if ylim:
         ax.set_ylim(*ylim)
     region = "RECCAP2 permafrost region" if cfg.region == "reccap" else "global"
-    ax.set_title(f"{model} - {title} - {region} ({cfg.forcing.upper()})", fontsize=11)
+    heading = f"{title}, change since {base_year}" if anomaly else title
+    ax.set_title(f"{model} - {heading} - {region} ({cfg.forcing.upper()})", fontsize=11)
     ax.set_xlabel("Year")
-    ax.set_ylabel(f"{title} (Pg C)")
+    ax.set_ylabel(f"Change in {title[0].lower() + title[1:]} since {base_year} (Pg C)"
+                  if anomaly else f"{title} (Pg C)")
     ax.grid(alpha=0.3)
     ax.legend(frameon=False, ncol=2 if len(series) > 4 else 1, fontsize=9, title="Scenario")
     fig.tight_layout()
@@ -375,7 +428,8 @@ def plot_model(io, cfg, model, part, series, hist, styles, ylim):
     ids = ("_" + "-".join(str(int(r)) for r in cfg.mask_regions)
            if cfg.mask_regions and cfg.region == "reccap" else "")
     h = "_hist" if hist is not None else ""
-    path = out_dir / f"{model}_{part}_{cfg.region}{ids}{h}_{date.today():%Y-%m-%d}.png"
+    a = f"_anom{base_year}" if anomaly else ""
+    path = out_dir / f"{model}_{part}_{cfg.region}{ids}{h}{a}_{date.today():%Y-%m-%d}.png"
     fig.savefig(path, dpi=200)
     print(f"  saved {path.name}")
     return fig
@@ -402,6 +456,11 @@ def main(argv=None):
     ap.add_argument("--share-y", action="store_true", help="share the y range across models (per part)")
     ap.add_argument("--history", action="store_true", help="also compute and draw the historical run")
     ap.add_argument("--hist-sim", default="hist", help="registry simulation name for the historical run")
+    ap.add_argument("--hist-start", type=int, default=HIST_START,
+                    help="first historical year to show (default %(default)s; 0 = whole record)")
+    ap.add_argument("--anomaly", action="store_true",
+                    help="plot the change since --base-year instead of the raw values")
+    ap.add_argument("--base-year", type=int, default=2024, help="reference year for --anomaly")
     ap.add_argument("--factorial", default=None)
     ap.add_argument("--refresh", action="store_true", help="ignore cached series")
     ap.add_argument("--check-only", action="store_true", help="show the plan for each model; load no data")
@@ -512,19 +571,37 @@ def main(argv=None):
         print(f"  FAILED ({len(runs)}): {', '.join(runs[:8])}{' ...' if len(runs) > 8 else ''} -> {msg}")
     results["series"], results["hist"] = data, hist_data
 
+    # raw values, or change since the base year (applied here, so cached series stay raw)
+    shown_hist = hist_data
+    if hist_sim and args.hist_start:
+        shown_hist = {}
+        for key, ser in hist_data.items():
+            trimmed = ser[ser.index >= args.hist_start]
+            if len(trimmed):
+                shown_hist[key] = trimmed
+    plot_data, plot_hist = data, shown_hist
+    if args.anomaly:
+        plot_data, plot_hist, notes = to_anomaly(data, shown_hist, args.base_year)
+        results["anomaly"], results["anomaly_hist"] = plot_data, plot_hist
+        if notes:
+            print(f"  note: {len(notes)} series have no {args.base_year} value and use the nearest year "
+                  f"(first: {notes[0]})")
+
     print("\nCharts:")
     styles = scenario_styles(scenarios)
     ylims = {}
     if args.share_y:
         for part in args.parts:
-            vals = [v for (m, pt), d in data.items() if pt == part for s in d.values() for v in (s.min(), s.max())]
-            vals += [v for (m, pt), s in hist_data.items() if pt == part for v in (s.min(), s.max())]
+            vals = [v for (m, pt), d in plot_data.items() if pt == part for s in d.values() for v in (s.min(), s.max())]
+            vals += [v for (m, pt), s in plot_hist.items() if pt == part for v in (s.min(), s.max())]
             if vals:
                 pad = 0.05 * ((max(vals) - min(vals)) or 1.0)
-                ylims[part] = (max(0.0, min(vals) - pad), max(vals) + pad)
-    for (m, part), series in data.items():
+                lo = min(vals) - pad
+                ylims[part] = (lo if args.anomaly else max(0.0, lo), max(vals) + pad)
+    for (m, part), series in plot_data.items():
         results["figures"][(m, part)] = plot_model(
-            io, cfg, m, part, series, hist_data.get((m, part)), styles, ylims.get(part))
+            io, cfg, m, part, series, plot_hist.get((m, part)), styles, ylims.get(part),
+            anomaly=args.anomaly, base_year=args.base_year)
     return results
 
 

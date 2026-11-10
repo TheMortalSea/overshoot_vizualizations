@@ -15,8 +15,8 @@ Model eligibility (--depth, --tolerance)
 ----------------------------------------
 * Layers bracket the depth                 -> interpolate ("interp").
 * Deepest layer centre is within --tolerance
-  (default 1.5 m) above the depth          -> use the deepest layer as a proxy, flagged in the
-                                              legend ("deepest").
+  (default 1.5 m) above the depth          -> use the deepest layer as a proxy, flagged with an
+                                              asterisk and a dashed line ("deepest").
 * Otherwise                                -> model is excluded, with the reason printed.
 Models whose files lack layer depths can be given them in LAYER_DEPTHS below or with
 --layer-depths MODEL=z1,z2,... (centres in metres, top to bottom).
@@ -24,9 +24,14 @@ Models whose files lack layer depths can be given them in LAYER_DEPTHS below or 
 Charts
 ------
 * One figure per scenario that at least --min-models eligible models share
-  (one line per model; a bar along the top edge shows the scenario's registry colour).
+  (one line per model; the scenario's registry colour marks the subtitle).
 * One figure per model (one line per scenario, coloured with the registry's SCENARIO_COLORS).
 * With --history, the historical run (--hist-sim, default "hist") is prepended to every line.
+  --hist-start (default HIST_START = 1950) drops historical years before that year; 0 keeps the
+  whole record. It is applied when plotting, so cached series are unaffected.
+* Style: lines are labelled directly at their right-hand end (no legend), the historical period
+  is shaded, and model colours (per-scenario charts) come from a colour-blind-friendly palette
+  that is separate from the registry's scenario colours. Edit STYLE / MODEL_COLOURS to taste.
 
 Speed and memory
 ----------------
@@ -45,6 +50,7 @@ Notebook use:
     wec.main(["--io-module", "wiemip_io", "--check-only"])
     wec.main(["--io-module", "wiemip_io", "--models", "CLM", "JULES", "CoLM", "CLM_FATES",
               "--forcing", "gfdl", "--scenarios", "l", "m", "ml", "hl", "--history",
+              "--hist-start", "1950",
               "--mask-regions", "101", "103", "106", "108", "--min-models", "1", "--mean"])
 """
 
@@ -79,6 +85,7 @@ def scen_colour(s: str) -> str:
     return SCENARIO_COLORS.get(s, "#555555")
 
 
+HIST_START = 1950                           # first historical year shown (0 = show everything)
 NOLEAP = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31], dtype="f8")
 SPATIAL = {"time", "lat", "lon", "latitude", "longitude"}
 METRES = {"m", "meter", "meters", "metre", "metres"}
@@ -90,8 +97,31 @@ LAYER_BOTTOM: dict[str, float] = {}         # model -> bottom of the deepest lay
 #   "JSBACH": [0.065, 0.254, 0.913, 2.902, 5.700]     (illustrative: take these from the model docs)
 LAYER_DEPTHS: dict[str, list[float]] = {}
 
-HIST: dict[str, pd.Series] = {}             # model -> historical extent series
+HIST: dict[str, pd.Series] = {}             # model -> historical extent series (as shown)
 _W_CACHE: dict = {}
+
+# Chart styling ------------------------------------------------------------------------------
+# Model colours for per-scenario charts (Okabe-Ito, colour-blind friendly). Scenario colours
+# always come from the registry, so a colour never means two different things.
+MODEL_COLOURS = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#7F7F7F", "#8C564B"]
+STYLE = {
+    "font.size": 10,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.edgecolor": "0.35",
+    "axes.labelcolor": "0.25",
+    "axes.labelsize": 10,
+    "xtick.color": "0.3",
+    "ytick.color": "0.3",
+    "xtick.major.size": 3,
+    "ytick.major.size": 3,
+    "axes.grid": True,
+    "axes.grid.axis": "y",
+    "axes.axisbelow": True,
+    "grid.color": "0.9",
+    "grid.linewidth": 0.8,
+    "legend.frameon": False,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +276,18 @@ def with_hist(model, ser):
     return pd.concat([h[h.index < ser.index.min()], ser])
 
 
+def trim_history(hist, start):
+    """Drop historical years before `start` (in place). start=0 keeps everything."""
+    if not start:
+        return
+    for m in list(hist):
+        kept = hist[m][hist[m].index >= start]
+        if len(kept):
+            hist[m] = kept
+        else:
+            del hist[m]
+
+
 # ---------------------------------------------------------------------------
 # Extent per year
 # ---------------------------------------------------------------------------
@@ -366,52 +408,112 @@ def get_extent(io, cfg, mask, model, sim, depth, tol, threshold_c, block_years, 
 # Plotting
 # ---------------------------------------------------------------------------
 
-def _footer(fig, args):
-    fig.text(0.99, 0.01, f"annual-mean soil T at {args.depth:g} m <= {args.threshold:g} °C",
-             ha="right", va="bottom", fontsize=7, color="0.4")
+def _model_colours(cfg):
+    return {m: MODEL_COLOURS[i % len(MODEL_COLOURS)] for i, m in enumerate(cfg.models)}
+
+
+def _header(ax, title, subtitle, accent=None):
+    """Left-aligned bold title with a grey subtitle; `accent` adds a coloured square before it."""
+    ax.set_title(title, loc="left", fontsize=13, fontweight="bold", color="0.15", pad=28)
+    x0 = 0.0
+    if accent:
+        ax.plot([0.008], [1.052], marker="s", ms=9, color=accent, ls="none",
+                transform=ax.transAxes, clip_on=False)
+        x0 = 0.024
+    ax.text(x0, 1.035, subtitle, transform=ax.transAxes, fontsize=9.5, color="0.4", va="bottom")
+
+
+def _footer(ax, args, extra=None):
+    text = f"Permafrost: annual-mean soil temperature at {args.depth:g} m ≤ {args.threshold:g} °C"
+    if extra:
+        text += f"   ·   {extra}"
+    ax.text(0.0, -0.16, text, transform=ax.transAxes, fontsize=7.5, color="0.45", va="top")
+
+
+def _history_band(ax, x_start, x_hist_first):
+    """Shade the historical period and label the two sides of the boundary."""
+    ax.axvspan(x_hist_first, x_start, color="0.955", zorder=0, lw=0)
+    ax.axvline(x_start, color="0.7", ls=":", lw=1, zorder=1)
+    tr = ax.get_xaxis_transform()
+    ax.text(x_hist_first, 0.985, " Historical", transform=tr, va="top", ha="left", fontsize=8, color="0.5")
+    ax.text(x_start, 0.985, " Scenarios", transform=tr, va="top", ha="left", fontsize=8, color="0.5")
+
+
+def _end_labels(ax, items, min_gap=0.05):
+    """Label lines at their right-hand end, spreading labels apart so they don't overlap.
+
+    items: (x_last, y_last, label, colour). Call after the y-limits are final.
+    """
+    if not items:
+        return
+    y0, y1 = ax.get_ylim()
+    span = (y1 - y0) or 1.0
+    items = sorted(items, key=lambda it: it[1])
+    pos = [(it[1] - y0) / span for it in items]
+    for i in range(1, len(pos)):                                  # push apart going up
+        pos[i] = max(pos[i], pos[i - 1] + min_gap)
+    over = pos[-1] - 1.0
+    if over > 0:                                                  # too high: shift down, re-separate
+        pos = [p - over for p in pos]
+        for i in range(len(pos) - 2, -1, -1):
+            pos[i] = min(pos[i], pos[i + 1] - min_gap)
+    for (x, y, label, colour), p in zip(items, pos):
+        ax.plot([x], [y], marker="o", ms=4, color=colour, ls="none", clip_on=False, zorder=5)
+        ax.text(1.012, p, label, transform=ax.transAxes, color=colour, fontsize=9.5,
+                fontweight="bold", va="center", ha="left")
+
+
+def _save(io, fig, cfg, args, name):
+    out_dir = io.FIGURE_DIR / f"ensemble_{cfg.forcing}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / name
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    print(f"  saved {path.name}")
+    return path
+
+
+def _ids(cfg):
+    return ("_" + "-".join(str(int(r)) for r in cfg.mask_regions)
+            if cfg.mask_regions and cfg.region == "reccap" else "")
 
 
 def plot_scenario(io, cfg, scenario, data, models, notes, args, ylim):
     """One scenario: one line per model (history prepended when available)."""
-    colours = {m: f"C{i % 10}" for i, m in enumerate(cfg.models)}
-    fig, ax = plt.subplots(figsize=(7.5, 4.6))
-    frame = {}
-    for m in models:
-        s = with_hist(m, data[(m, scenario)])
-        proxy = notes.get(m, ("",))[0] == "proxy"
-        label = m + (" (bottom layer used)" if proxy else "")
-        ax.plot(s.index, s.values, lw=1.8, color=colours[m], label=label,
-                ls="--" if proxy else "-")
-        frame[m] = s
-    if args.mean and len(frame) > 1:
-        df = pd.DataFrame(frame)
-        mean = df.mean(axis=1)[df.count(axis=1) >= 2]
-        ax.plot(mean.index, mean.values, color="black", lw=2.6, label="Ensemble mean")
-    if HIST:
-        ax.axvline(int(min(data[(m, scenario)].index.min() for m in models)),
-                   color="0.6", ls=":", lw=1)
-    if ylim:
-        ax.set_ylim(*ylim)
+    colours = _model_colours(cfg)
     region = "RECCAP2 permafrost region" if cfg.region == "reccap" else "global"
-    ax.set_title(f"Permafrost extent - {scenario.upper()} - {region} ({cfg.forcing.upper()})", fontsize=11)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Permafrost extent (million km$^2$)")
-    ax.grid(alpha=0.3)
-    ax.legend(frameon=False, fontsize=9)
-    _footer(fig, args)
-    # bar along the top edge in the scenario's registry colour
-    ax.add_patch(plt.Rectangle((0, 1.0), 1, 0.012, transform=ax.transAxes,
-                               color=scen_colour(scenario), clip_on=False))
-    fig.tight_layout()
-
-    out_dir = io.FIGURE_DIR / f"ensemble_{cfg.forcing}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ids = ("_" + "-".join(str(int(r)) for r in cfg.mask_regions)
-           if cfg.mask_regions and cfg.region == "reccap" else "")
-    hist = "_hist" if HIST else ""
-    path = out_dir / f"pfextent_{scenario}_z{args.depth:g}_{cfg.region}{ids}{hist}_{date.today():%Y-%m-%d}.png"
-    fig.savefig(path, dpi=200)
-    print(f"  saved {path.name}")
+    with plt.rc_context(STYLE):
+        fig, ax = plt.subplots(figsize=(8.8, 5.0))
+        items, frame, any_proxy = [], {}, False
+        for m in models:
+            s = with_hist(m, data[(m, scenario)])
+            proxy = notes.get(m, ("",))[0] == "proxy"
+            any_proxy = any_proxy or proxy
+            ax.plot(s.index, s.values, lw=2.0, color=colours[m], ls="--" if proxy else "-",
+                    solid_capstyle="round")
+            frame[m] = s
+            items.append((s.index[-1], s.values[-1], m + ("*" if proxy else ""), colours[m]))
+        if args.mean and len(frame) > 1:
+            df = pd.DataFrame(frame)
+            mean = df.mean(axis=1)[df.count(axis=1) >= 2]
+            ax.plot(mean.index, mean.values, color="black", lw=2.8, solid_capstyle="round")
+            items.append((mean.index[-1], mean.values[-1], "Ensemble mean", "black"))
+        if HIST:
+            start = int(min(data[(m, scenario)].index.min() for m in models))
+            first = int(min(h.index.min() for h in HIST.values()))
+            if first < start:
+                _history_band(ax, start, first)
+        ax.margins(x=0.01)
+        if ylim:
+            ax.set_ylim(*ylim)
+        _end_labels(ax, items)
+        _header(ax, "Permafrost extent", f"{scenario.upper()}  ·  {region}  ·  {cfg.forcing.upper()}",
+                accent=scen_colour(scenario))
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Permafrost extent (million km$^2$)")
+        _footer(ax, args, "* bottom soil layer used as proxy for the depth" if any_proxy else None)
+        hist = "_hist" if HIST else ""
+        _save(io, fig, cfg, args,
+              f"pfextent_{scenario}_z{args.depth:g}_{cfg.region}{_ids(cfg)}{hist}_{date.today():%Y-%m-%d}.png")
     return fig
 
 
@@ -421,32 +523,33 @@ def plot_model(io, cfg, model, data, scenarios, args, ylim):
     if not present:
         return None
     order = {s: i for i, s in enumerate(SCENARIO_COLORS)}          # registry order (vl ... hl)
-    fig, ax = plt.subplots(figsize=(7.5, 4.6))
-    h = HIST.get(model)
-    if h is not None:
-        ax.plot(h.index, h.values, lw=1.8, color=scen_colour("hist"), label="HIST")
-    for s in sorted(present, key=lambda s: order.get(s, 99)):
-        ser = data[(model, s)]
-        ax.plot(ser.index, ser.values, lw=1.8, color=scen_colour(s), label=s.upper())
-    if ylim:
-        ax.set_ylim(*ylim)
     region = "RECCAP2 permafrost region" if cfg.region == "reccap" else "global"
-    ax.set_title(f"Permafrost extent - {model} - {region} ({cfg.forcing.upper()})", fontsize=11)
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Permafrost extent (million km$^2$)")
-    ax.grid(alpha=0.3)
-    ax.legend(frameon=False, fontsize=9, ncol=2)
-    _footer(fig, args)
-    fig.tight_layout()
-
-    out_dir = io.FIGURE_DIR / f"ensemble_{cfg.forcing}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ids = ("_" + "-".join(str(int(r)) for r in cfg.mask_regions)
-           if cfg.mask_regions and cfg.region == "reccap" else "")
-    path = out_dir / f"pfextent_{model}_z{args.depth:g}_{cfg.region}{ids}_{date.today():%Y-%m-%d}.png"
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
-    print(f"  saved {path.name}")
+    with plt.rc_context(STYLE):
+        fig, ax = plt.subplots(figsize=(8.8, 5.0))
+        h = HIST.get(model)
+        if h is not None:
+            ax.plot(h.index, h.values, lw=2.0, color=scen_colour("hist"), solid_capstyle="round")
+        items = []
+        for s in sorted(present, key=lambda s: order.get(s, 99)):
+            ser = data[(model, s)]
+            ax.plot(ser.index, ser.values, lw=2.0, color=scen_colour(s), solid_capstyle="round")
+            items.append((ser.index[-1], ser.values[-1], s.upper(), scen_colour(s)))
+        if h is not None:
+            start = int(min(data[(model, s)].index.min() for s in present))
+            if int(h.index.min()) < start:
+                _history_band(ax, start, int(h.index.min()))
+        ax.margins(x=0.01)
+        if ylim:
+            ax.set_ylim(*ylim)
+        _end_labels(ax, items)
+        _header(ax, "Permafrost extent", f"{model}  ·  {region}  ·  {cfg.forcing.upper()}")
+        ax.set_xlabel("Year")
+        ax.set_ylabel("Permafrost extent (million km$^2$)")
+        _footer(ax, args)
+        hist = "_hist" if h is not None else ""
+        path = _save(io, fig, cfg, args,
+                     f"pfextent_{model}_z{args.depth:g}_{cfg.region}{_ids(cfg)}{hist}_{date.today():%Y-%m-%d}.png")
+        plt.close(fig)
     return path
 
 
@@ -476,6 +579,8 @@ def main(argv=None):
     ap.add_argument("--free-y", action="store_true", help="each chart picks its own y range")
     ap.add_argument("--history", action="store_true", help="also compute and prepend the historical run")
     ap.add_argument("--hist-sim", default="hist", help="registry simulation name for the historical run")
+    ap.add_argument("--hist-start", type=int, default=HIST_START,
+                    help="first historical year to show (default %(default)s; 0 = whole record)")
     ap.add_argument("--factorial", default=None)
     ap.add_argument("--refresh", action="store_true", help="ignore cached series")
     ap.add_argument("--check-only", action="store_true", help="report eligibility and scenarios; load no data")
@@ -566,7 +671,10 @@ def main(argv=None):
                 print(f"  {m}: no {args.hist_sim} soilT found")
             except Exception as e:
                 print(f"  {m}: FAILED {type(e).__name__}: {str(e)[:200]}")
-        results["hist"] = dict(HIST)
+        results["hist"] = dict(HIST)                  # full record, as cached
+        trim_history(HIST, args.hist_start)           # what the charts show
+        if args.hist_start:
+            print(f"  showing history from {args.hist_start}")
 
     # ---- charts ----
     vals = [v for s in [*data.values(), *HIST.values()] for v in (s.min(), s.max())]
