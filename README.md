@@ -11,8 +11,6 @@ RECCAP2 permafrost region. Three scripts make the charts:
 | `wiemip_soilc_charts.py` | **Soil carbon** over time (Pg C), above 1 m, below 1 m, or total: one chart per model with all its scenarios |
 | `wiemip_veg_charts.py` | **Vegetation carbon** over time (Pg C): one chart per model with all its scenarios |
 
-[TODO: one sentence on the project, e.g. what the overshoot experiments are and what question these charts answer.]
-
 ---
 
 ## 1. What you need
@@ -37,9 +35,7 @@ overshoot_vizualizations/
 ```
 
 **Python environment:** `wiemip_registry` (the data registry), `numpy`, `pandas`, `xarray`,
-`matplotlib`, and `dask` (needed by the extent script only). [TODO: how a new user gets access to the
-environment / the data bucket.]
-
+`matplotlib`, and `dask` (needed by the extent script only).
 ---
 
 ## 2. Quick start (in a notebook)
@@ -123,6 +119,8 @@ Saved to `figures/soilc_<forcing>/`. Returns `res["series"][(model, part)][scena
 
 ### `wiemip_extent_charts.py`: permafrost extent
 
+The generation of these charts does take significantly longer than the other two. That is just the nature of the extra calculation.
+
 **Definition:** a grid cell is permafrost in a year if its annual-mean soil temperature at `--depth`
 (default 10 m) is at or below `--threshold` (default 0 °C), interpolated between soil layers. Extent is the
 area of those cells inside the region.
@@ -144,9 +142,7 @@ Things specific to this script:
 - **Not every model can be used.** A model needs soil temperature down to about the chosen depth. The
   `--check-only` output lists each model as `INCLUDED`, `INCLUDED (proxy)` or `excluded`, with the reason. A
   *proxy* model (dashed line, `*` in the label) uses its deepest layer because the target depth falls
-  inside that layer. [TODO: update the list of excluded models for your data; at the time of writing,
-  models with soil columns too shallow or without layer depths, such as LPX_Bern, JSBACH and LPJ_EOSIM, were
-  not included.]
+  inside that layer. 
 - **It reads the files itself, not through the registry**, to keep memory low. This needs `dask`, only works
   for **monthly** files, and takes the start year from file names like `...1951-2023.nc`. It does not fall
   back to loading everything: if a file can't be opened lazily you get a clear error.
@@ -191,7 +187,6 @@ zero. Cached results stay as raw values, so switching it on or off never recompu
 - **Totals:** Pg C values are cell area × region fraction × the model value, summed over the region.
 - **Scenarios:** names come from the registry (`l`, `m`, `ml`, `vl`, `hl`, ...). The suffix `_cf` marks a
   counterfactual run of that scenario. Line colours always come from the registry's scenario colours.
-  [TODO: add a short table saying what each scenario name means.]
 - **Forcing:** the climate pattern driving the experiment. Charts for different forcings are not
   interchangeable, and not every model has every forcing.
 - **Historical run:** `hist`, which normally ends where the scenarios start (2024). A dotted line or shaded band marks
@@ -231,20 +226,3 @@ a `Mask ...` line (which region it is using), then *Computing...* with one line 
 saved filenames. A line ending in `<-- CHECK` or `FAILED` needs attention.
 
 ---
-
-## 8. Known limitations
-
-- Models are not directly comparable in every respect: soil depth definitions, land masks and carbon pools
-  differ. Compare shapes and changes (the anomaly option helps) more than absolute values.
-- Veg and soil carbon totals assume each model reports carbon per unit grid-cell area. If a model's totals
-  look off by a roughly constant factor, run `python wiemip_charts.py --check-totals` to compare against the
-  registry's own totals. [TODO: confirm.]
-- The extent calculation bypasses the registry's read step, so check any model you add for the first time
-  against a registry-based result before trusting it.
-- Models whose deepest soil layer ends before the permafrost depth are excluded from the extent charts.
-
----
-
-## 9. Contact
-
-[TODO: name / email / issue tracker.]
